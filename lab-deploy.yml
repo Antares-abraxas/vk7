@@ -1,0 +1,134 @@
+- name: Deploy and secure web application containers
+  hosts: localhost
+  connection: local
+  become: yes  
+
+  vars:
+    app_user: "appadmin"  
+    work_dir: "/opt/webapp"  
+    container_name: "secure-app"  
+    
+    # Параметры загрузки (реальная контрольная сумма обязательна)
+    download_url: "https://github.com/octocat/Hello-World/tarball/master"
+    download_checksum: "sha256:a591a6d40bf420404a011733..."  # Получить: curl -L URL | sha256sum
+    
+    # Безопасные версии образов 
+    nginx_image: "nginx:1.25.3"  # Актуальная стабильная версия
+    python_image: "python:3.8-slim"  
+
+  tasks:
+  
+    - name: Load secrets from vault
+      include_vars:
+        file: secrets.yml  # Файл должен быть предварительно зашифрован
+        name: secrets      # Переменные будут доступны как `secrets.*`
+      tags: always         # Выполняется всегда, даже с другими тегами
+  
+    - name: Update system package cache
+      apt:
+        update_cache: yes
+      tags: system
+
+    - name: Install Docker (official package)
+      apt:
+        name: docker-ce  # Вместо устаревшего docker.io
+        state: present
+      tags: docker
+
+    - name: Configure application user
+      user:
+        name: "{{ app_user }}"
+        password: "{{ secrets.app_password | password_hash('sha512') }}"
+        groups: docker
+        shell: /bin/bash
+      tags: security
+
+    - name: Configure firewall rules
+      ufw:  # Явно разрешаем только нужные порты
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - 8080  # Для secure-app
+        - 5000  # Для vuln-app
+      notify: enable firewall
+      tags: security
+
+    - name: Download application archive (с проверкой целостности)
+      get_url:
+        url: "{{ download_url }}"
+        dest: "/tmp/app.tar.gz"
+        checksum: "{{ download_checksum }}"  # Обязательная проверка
+        timeout: 30
+      tags: app
+
+    - name: Create secure index.html
+      copy:
+        dest: "{{ work_dir }}/index.html"
+        content: |
+          <!DOCTYPE html>
+          <html><head><title>Secure App</title></head>
+          <body><h1>Welcome</h1></body></html>
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0644'
+      tags: app
+
+    - name: Extract application (без токена в index.html)
+      unarchive:
+        src: "/tmp/app.tar.gz"
+        dest: "{{ work_dir }}"
+        remote_src: yes
+        extra_opts: ["--strip-components=1"]  # Убираем лишние уровни директорий
+      tags: app
+
+    # -----------------------------------
+    - name: Deploy secure Nginx container
+      docker_container:
+        name: "{{ container_name }}"
+        image: "{{ nginx_image }}"
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "8080:80"  # Пробрасываем порт
+        volumes:
+          - "{{ work_dir }}:/usr/share/nginx/html:ro"  # Только чтение
+        security_opts:
+          - "no-new-privileges"  # Запрет эскалации прав
+        env:
+            SECRET_TOKEN: "{{ secrets.secret_token }}"
+      tags: docker
+
+    - name: Build and deploy vuln-app 
+      docker_container:
+        name: "vuln-app"
+        image: "vuln-app-image"
+        state: started
+        ports:
+          - "5000:5000"
+        build:
+          path: ./vuln-app  
+          dockerfile: Dockerfile.secure
+        security_opts:
+          - "no-new-privileges"
+        cap_drop:  # Запрещаем опасные capabilities
+          - ALL
+      tags: docker
+
+    - name: Configure restricted sudo access
+      copy:
+        dest: "/etc/sudoers.d/{{ app_user }}"
+        content: |
+          # Ограниченный доступ вместо NOPASSWD:ALL
+          {{ app_user }} ALL=(ALL) /usr/bin/docker
+        mode: '0440'
+        validate: 'visudo -cf %s'  # Проверка синтаксиса
+      tags: security
+
+  # Обработчики
+  handlers:
+    - name: enable firewall
+      ufw:
+        state: enabled
+        policy: deny  # Все что не разрешено - запрещено
+      tags: security
