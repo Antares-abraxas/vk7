@@ -10,7 +10,7 @@
     
     # Параметры загрузки (реальная контрольная сумма обязательна)
     download_url: "https://github.com/octocat/Hello-World/tarball/master"
-    download_checksum: "sha256:a591a6d40bf420404a011733..."  # Получить: curl -L URL | sha256sum
+    download_checksum: "9f40b519431e9754a1680244b820877ca975aa969ea4ae72798bfe3f67d0f139"  # Получить: curl -L URL | sha256sum
     
     # Безопасные версии образов 
     nginx_image: "nginx:1.25.3"  # Актуальная стабильная версия
@@ -29,9 +29,9 @@
         update_cache: yes
       tags: system
 
-    - name: Install Docker (official package)
+    - name: Install Docker
       apt:
-        name: docker-ce  # Вместо устаревшего docker.io
+        name: docker.io
         state: present
       tags: docker
 
@@ -54,7 +54,7 @@
       notify: enable firewall
       tags: security
 
-    - name: Download application archive (с проверкой целостности)
+    - name: Download application archive 
       get_url:
         url: "{{ download_url }}"
         dest: "/tmp/app.tar.gz"
@@ -74,7 +74,17 @@
         mode: '0644'
       tags: app
 
-    - name: Extract application (без токена в index.html)
+    - name: Set permissions on work directory
+      file:
+        path: "{{ work_dir }}"
+        state: directory
+        recurse: yes
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0750'
+      tags: permissions
+      
+    - name: Extract application 
       unarchive:
         src: "/tmp/app.tar.gz"
         dest: "{{ work_dir }}"
